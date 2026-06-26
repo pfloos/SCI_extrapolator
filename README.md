@@ -1,3 +1,10 @@
+[![License](https://img.shields.io/badge/License-CC%20BY%20SA%204.0-lightgrey)](https://creativecommons.org/licenses/by/4.0/)
+[![Last Update](https://img.shields.io/github/last-commit/pfloos/QUESTDB?label=last%20update)](https://github.com/pfloos/QUESTDB/commits/main)
+
+[![GitHub Repo stars](https://img.shields.io/github/stars/pfloos/QUESTDB?style=social)](https://github.com/pfloos/QUESTDB/stargazers)
+[![GitHub forks](https://img.shields.io/github/forks/pfloos/QUESTDB?style=social)](https://github.com/pfloos/QUESTDB/network/members)
+[![GitHub watchers](https://img.shields.io/github/watchers/pfloos/QUESTDB?style=social)](https://github.com/pfloos/QUESTDB/watchers)
+
 # Selected CI Extrapolation Tool
 
 This script performs robust extrapolation of **selected CI (sCI) energies** using the renormalized second-order perturbative correction (rPT2). It is designed to process JSON outputs from quantum chemistry calculations and compute reliable excitation energies with associated uncertainty estimates.
@@ -176,7 +183,7 @@ Uncertainty is estimated from the residuals of the weighted linear regression an
 
 ## Author
 
-Developed for selected CI post-processing workflows in quantum chemistry.
+[Pierre-François Loos](https://pfloos.github.io/WEB_LOOS)
 
 ⸻
 
