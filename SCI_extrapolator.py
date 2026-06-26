@@ -20,6 +20,34 @@ SPIN_REFERENCES = {
     "Quintet": 6.0
 }
 
+# ANSI color codes for terminal output (optional)
+COLORS = {
+    "HEADER": '\033[95m',
+    "BLUE": '\033[94m',
+    "CYAN": '\033[96m',
+    "GREEN": '\033[92m',
+    "YELLOW": '\033[93m',
+    "RED": '\033[91m',
+    "BOLD": '\033[1m',
+    "UNDERLINE": '\033[4m',
+    "END": '\033[0m',
+    "DIM": '\033[2m'
+}
+
+# Try to determine if we're in a terminal that supports colors
+try:
+    USE_COLORS = sys.stdout.isatty()
+except:
+    USE_COLORS = False
+
+
+def colorize(text: str, color: str) -> str:
+    """Apply color to text if terminal supports it."""
+    if USE_COLORS and color in COLORS:
+        return f"{COLORS[color]}{text}{COLORS['END']}"
+    return text
+
+
 # ============================================================
 # Data Extraction
 # ============================================================
@@ -149,14 +177,18 @@ def track_states(iters: list[dict]) -> tuple[dict, dict]:
         
     Returns:
         trajectories: Dictionary mapping state index to list of (rPT2, energy) points
-        final_s2: Dictionary mapping state index to S2 value at smallest iteration
+        spin_states: Dictionary mapping state index to S2 value from largest iteration
     """
     # Start with the largest wave function (most accurate)
     ref = [fingerprint(s) for s in iters[-1]["states"]]
     n_states = len(ref)
     
     trajectories = {i: [] for i in range(n_states)}
-    final_s2 = {}
+    
+    # Store S2 values from the largest (most accurate) wave function
+    spin_states = {}
+    for i, state in enumerate(iters[-1]["states"]):
+        spin_states[i] = state.get("s2", 0.0)
     
     # Start from the largest and work backwards to the smallest
     prev = ref
@@ -179,10 +211,6 @@ def track_states(iters: list[dict]) -> tuple[dict, dict]:
             rpt2_val = iters[idx]["states"][j].get("rpt2", 0.0)
             energy_val = iters[idx]["states"][j].get("energy", np.nan)
             trajectories[i].append((rpt2_val, energy_val))
-            
-            # If this is the smallest iteration, store its S2 value
-            if idx == 0:
-                final_s2[i] = curr[j]["s2"]
         
         # Update reference to the current (smaller) wave function
         prev = [curr[j] for _, j in zip(row_indices, col_indices)]
@@ -192,7 +220,7 @@ def track_states(iters: list[dict]) -> tuple[dict, dict]:
     for i in range(n_states):
         trajectories[i].reverse()
     
-    return trajectories, final_s2
+    return trajectories, spin_states
 
 
 # ============================================================
@@ -253,50 +281,80 @@ def print_summary(filename: str, iters: list[dict], n_states: int):
     """
     ndets = [it["n_det"] for it in iters]
     
-    print("\n" + "═" * 78)
-    print(" Selected CI Extrapolation Summary ".center(78))
-    print("═" * 78)
+    print("\n" + colorize("═" * 78, "CYAN"))
+    print(colorize(" Selected CI Extrapolation Summary ".center(78), "BOLD"))
+    print(colorize("═" * 78, "CYAN"))
     
-    print(f" File              : {filename}")
-    print(f" Iterations        : {len(iters)}")
-    print(f" States tracked    : {n_states}")
-    print(f" Determinants      : {min(ndets):>10d} → {max(ndets):>10d}")
-    print(f" Extrapolation     : linear fit of E_var vs rPT2")
-    print(f" Fit points        : 3 to 6 best (minimum residual)")
-    print(f" Weights           : 1 / rPT2²")
-    print(f" State tracking    : Hungarian matching (largest → smallest)")
-    print(f" Matching metric   : E + S² + variance + ex_energy fingerprint")
+    print(f" {colorize('File', 'BOLD'):<30} : {filename}")
+    print(f" {colorize('Iterations', 'BOLD'):<30} : {len(iters)}")
+    print(f" {colorize('States tracked', 'BOLD'):<30} : {n_states}")
+    print(f" {colorize('Determinants', 'BOLD'):<30} : {min(ndets):>10d} → {max(ndets):>10d}")
+    print(f" {colorize('Extrapolation', 'BOLD'):<30} : linear fit of E_var vs rPT2")
+    print(f" {colorize('Fit points', 'BOLD'):<30} : 3 to 6 best (minimum residual)")
+    print(f" {colorize('Weights', 'BOLD'):<30} : 1 / rPT2²")
+    print(f" {colorize('State tracking', 'BOLD'):<30} : Hungarian matching (largest → smallest)")
+    print(f" {colorize('Matching metric', 'BOLD'):<30} : E + S² + variance + ex_energy fingerprint")
+    print(f" {colorize('Spin assignment', 'BOLD'):<30} : from largest wave function")
     
-    print("═" * 78)
+    print(colorize("═" * 78, "CYAN"))
 
 
 def print_table(energies: list[float], errors: list[float], s2vals: dict):
     """
-    Print a formatted table of extrapolated energies and excitations.
+    Print a beautifully formatted table of extrapolated energies and excitations.
     
     Args:
         energies: List of extrapolated total energies
         errors: List of extrapolation errors
-        s2vals: Dictionary mapping state index to S2 value
+        s2vals: Dictionary mapping state index to S2 value (from largest wave function)
     """
     E0 = energies[0]
     dE0 = errors[0]
     
-    width = 98
+    # Define column widths (including padding)
+    col_widths = {
+        'state': 6,      # width for state number
+        'spin': 10,      # width for spin label
+        's2': 10,        # width for S2 value
+        'energy': 16,    # width for total energy
+        'error': 14,     # width for energy error
+        'excitation': 14, # width for excitation energy
+        'exc_error': 14   # width for excitation error
+    }
     
-    print("\n" + "═" * width)
-    print(" Selected CI Extrapolated Excitation Energies ".center(width))
-    print("═" * width)
+    # Calculate total width
+    total_width = sum(col_widths.values()) + 3 * 6  # 6 separators (│) with spaces
     
+    # Print header with decoration
+    print("\n" + colorize("═" * total_width, "CYAN"))
+    print(colorize(" Extrapolated Excitation Energies ".center(total_width), "BOLD"))
+    print(colorize("═" * total_width, "CYAN"))
+    
+    # Print column headers with proper alignment
     header = (
-        f"│ {'#':>3} │ {'Spin':^9} │ {'<S²>':^10} │ "
-        f"{'E_tot (Ha)':^18} │ {'σ(E) (Ha)':^12} │ "
-        f"{'ΔE (eV)':^12} │ {'σ(ΔE) (eV)':^12} │"
+        f"{colorize('State', 'BOLD'):>{col_widths['state']}} │ "
+        f"{colorize('Spin', 'BOLD'):^{col_widths['spin']}} │ "
+        f"{colorize('<S²>', 'BOLD'):^{col_widths['s2']}} │ "
+        f"{colorize('E_total (Ha)', 'BOLD'):^{col_widths['energy']}} │ "
+        f"{colorize('σ(E) (Ha)', 'BOLD'):^{col_widths['error']}} │ "
+        f"{colorize('ΔE (eV)', 'BOLD'):^{col_widths['excitation']}} │ "
+        f"{colorize('σ(ΔE) (eV)', 'BOLD'):^{col_widths['exc_error']}}"
     )
-    
     print(header)
-    print("├" + "─" * (width - 2) + "┤")
     
+    # Print separator with proper widths
+    separator = (
+        "─" * col_widths['state'] + "┼" +
+        "─" * col_widths['spin'] + "┼" +
+        "─" * col_widths['s2'] + "┼" +
+        "─" * col_widths['energy'] + "┼" +
+        "─" * col_widths['error'] + "┼" +
+        "─" * col_widths['excitation'] + "┼" +
+        "─" * col_widths['exc_error']
+    )
+    print(colorize(separator, "DIM"))
+    
+    # Print each state
     for i in range(len(energies)):
         if np.isnan(energies[i]):
             continue
@@ -304,42 +362,169 @@ def print_table(energies: list[float], errors: list[float], s2vals: dict):
         s2 = s2vals.get(i, np.nan)
         spin = spin_label(s2)
         
-        if i == 0:
-            exc = 0.0
-            exc_err = 0.0
-        else:
-            exc = (energies[i] - E0) * HA_TO_EV
-            exc_err = np.sqrt(errors[i]**2 + dE0**2) * HA_TO_EV
+        # State label
+        state_label = f"{i:>3d}"
         
-        print(
-            f"│ {i:3d} │ "
-            f"{spin:^9} │ "
-            f"{s2:10.4f} │ "
-            f"{energies[i]:18.10f} │ "
-            f"{errors[i]:12.3e} │ "
-            f"{exc:12.3f} │ "
-            f"{exc_err:12.3f} │"
+        exc = (energies[i] - E0) * HA_TO_EV
+        exc_err = np.sqrt(errors[i]**2 + dE0**2) * HA_TO_EV
+        
+        # Format values
+        energy_str = f"{energies[i]:14.8f}" if not np.isnan(energies[i]) else "N/A"
+        error_str = f"{errors[i]:10.3e}" if not np.isnan(errors[i]) else "N/A"
+        
+        # Color only the error columns based on magnitude
+        if not np.isnan(errors[i]):
+            if errors[i] < 1e-4:
+                error_str = colorize(error_str, "GREEN")
+            elif errors[i] < 1e-3:
+                error_str = colorize(error_str, "YELLOW")
+            else:
+                error_str = colorize(error_str, "RED")
+        
+        # Color excitation error
+        if not np.isnan(exc_err):
+            if exc_err < 0.01:
+                exc_err_str = colorize(f"{exc_err:10.3f}", "GREEN")
+            elif exc_err < 0.1:
+                exc_err_str = colorize(f"{exc_err:10.3f}", "YELLOW")
+            else:
+                exc_err_str = colorize(f"{exc_err:10.3f}", "RED")
+        else:
+            exc_err_str = "N/A"
+        
+        # Format excitation
+        exc_str = f"{exc:10.3f}" if i >= 0 else "N/A"
+        
+        # Print row with proper alignment
+        row = (
+            f"{state_label:>{col_widths['state']}} │ "
+            f"{spin:^{col_widths['spin']}} │ "
+            f"{s2:^{col_widths['s2']}.4f} │ "
+            f"{energy_str:^{col_widths['energy']}} │ "
+            f"{error_str:^{col_widths['error']}} │ "
+            f"{exc_str:^{col_widths['excitation']}} │ "
+            f"{exc_err_str:^{col_widths['exc_error']}}"
         )
+        print(row)
     
-    print("═" * width)
+    # Print footer
+    print(colorize("═" * total_width, "CYAN"))
+    
+    # Print legend for colored entries (only errors)
+    if USE_COLORS:
+        print(f"\n{colorize('Error legend:', 'BOLD')} "
+              f"{colorize('σ(E) < 1e-4', 'GREEN')} │ "
+              f"{colorize('1e-4 < σ(E) < 1e-3', 'YELLOW')} │ "
+              f"{colorize('σ(E) > 1e-3', 'RED')} │ "
+              f"{colorize('σ(ΔE) < 0.01 eV', 'GREEN')} │ "
+              f"{colorize('0.01 < σ(ΔE) < 0.1 eV', 'YELLOW')} │ "
+              f"{colorize('σ(ΔE) > 0.1 eV', 'RED')}")
+
+
+def print_compact_table(energies: list[float], errors: list[float], s2vals: dict):
+    """
+    Print a compact table format suitable for inclusion in papers.
+    
+    Args:
+        energies: List of extrapolated total energies
+        errors: List of extrapolation errors
+        s2vals: Dictionary mapping state index to S2 value (from largest wave function)
+    """
+    E0 = energies[0]
+    dE0 = errors[0]
+    
+    # Define column widths
+    col_widths = {
+        'state': 6,
+        'spin': 10,
+        's2': 8,
+        'exc': 12,
+        'exc_err': 10,
+        'energy': 14
+    }
+    
+    total_width = sum(col_widths.values()) + 5 * 3  # separators
+    
+    print("\n" + colorize("═" * total_width, "CYAN"))
+    print(colorize(" Extrapolated Excitation Energies (Compact) ".center(total_width), "BOLD"))
+    print(colorize("═" * total_width, "CYAN"))
+    
+    # Header
+    header = (
+        f"{colorize('State', 'BOLD'):>{col_widths['state']}} │ "
+        f"{colorize('Spin', 'BOLD'):^{col_widths['spin']}} │ "
+        f"{colorize('<S²>', 'BOLD'):^{col_widths['s2']}} │ "
+        f"{colorize('ΔE (eV)', 'BOLD'):^{col_widths['exc']}} │ "
+        f"{colorize('σ(ΔE)', 'BOLD'):^{col_widths['exc_err']}} │ "
+        f"{colorize('E_tot (Ha)', 'BOLD'):^{col_widths['energy']}}"
+    )
+    print(header)
+    
+    # Separator
+    separator = (
+        "─" * col_widths['state'] + "┼" +
+        "─" * col_widths['spin'] + "┼" +
+        "─" * col_widths['s2'] + "┼" +
+        "─" * col_widths['exc'] + "┼" +
+        "─" * col_widths['exc_err'] + "┼" +
+        "─" * col_widths['energy']
+    )
+    print(colorize(separator, "DIM"))
+    
+    # Print each state
+    for i in range(len(energies)):
+        if np.isnan(energies[i]):
+            continue
+        
+        s2 = s2vals.get(i, np.nan)
+        spin = spin_label(s2)
+        
+        exc = (energies[i] - E0) * HA_TO_EV
+        exc_err = np.sqrt(errors[i]**2 + dE0**2) * HA_TO_EV
+        
+        energy_str = f"{energies[i]:14.8f}" if not np.isnan(energies[i]) else "N/A"
+        
+        # Color only errors
+        error_str = f"{exc_err:10.4f}" if i > 0 else f"{0.0:10.4f}"
+        if USE_COLORS:
+            if exc_err < 0.01:
+                error_str = colorize(error_str, "GREEN")
+            elif exc_err < 0.1:
+                error_str = colorize(error_str, "YELLOW")
+            else:
+                error_str = colorize(error_str, "RED")
+        
+        # Print row
+        row = (
+            f"{i:>{col_widths['state']}} │ "
+            f"{spin:^{col_widths['spin']}} │ "
+            f"{s2:^{col_widths['s2']}.4f} │ "
+            f"{exc:^{col_widths['exc']}.4f} │ "
+            f"{error_str:^{col_widths['exc_err']}} │ "
+            f"{energy_str:^{col_widths['energy']}}"
+        )
+        print(row)
+    
+    print(colorize("═" * total_width, "CYAN"))
 
 
 # ============================================================
 # Main Function
 # ============================================================
 
-def compute(filename: str):
+def compute(filename: str, compact: bool = False):
     """
     Main computation workflow.
     
     Args:
         filename: Path to JSON data file
+        compact: If True, use compact table format
     """
     # Load and parse data
     iters = load_data(filename)
     
     # Track states across iterations
-    trajectories, s2_values = track_states(iters)
+    trajectories, spin_states = track_states(iters)
     
     # Extrapolate each state
     energies = []
@@ -356,7 +541,11 @@ def compute(filename: str):
     
     # Print results
     print_summary(filename, iters, len(trajectories))
-    print_table(energies, errors, s2_values)
+    
+    if compact:
+        print_compact_table(energies, errors, spin_states)
+    else:
+        print_table(energies, errors, spin_states)
 
 
 if __name__ == "__main__":
@@ -366,8 +555,18 @@ if __name__ == "__main__":
         epilog="""
 Example usage:
   python3 sci_extrapolator.py HF/aug-cc-pvdz/MoreStates/HF/json/00003.json
+  python3 sci_extrapolator.py --compact HF/aug-cc-pvdz/MoreStates/HF/json/00003.json
         """
     )
     parser.add_argument("filename", help="Path to the JSON data file.")
+    parser.add_argument("--compact", "-c", action="store_true", 
+                       help="Use compact table format (good for papers)")
+    parser.add_argument("--no-colors", action="store_true",
+                       help="Disable colored output")
     args = parser.parse_args()
-    compute(args.filename)
+    
+    # Override color setting if requested
+    if args.no_colors:
+        USE_COLORS = False
+    
+    compute(args.filename, compact=args.compact)
