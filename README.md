@@ -10,9 +10,9 @@ For each electronic state, the script:
 1. Extracts **variational energies** and **rPT2 corrections** from a sequence of SCI iterations.
 2. Tracks states consistently across iterations using a fingerprint-based matching procedure.
 3. Extrapolates the energy to the **zero rPT2 limit** using weighted linear regression:
-   \[
+   $$
    E_\text{var}(rPT2) \rightarrow E(rPT2 = 0)
-   \]
+   $$
 4. Estimates uncertainties from fit residuals.
 5. Computes **excitation energies relative to the ground state**, including propagated error bars.
 6. Assigns approximate **spin character** based on ⟨S²⟩.
