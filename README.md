@@ -220,8 +220,6 @@ where $\sigma_i$ is the uncertainty of state $i$ and $\sigma_0$ is the uncertain
 
 ## 📜 License
 
-Internal / academic use (adapt as needed).
-
-[![License](https://img.shields.io/badge/License-CC%20BY%20SA%204.0-lightgrey)](https://creativecommons.org/licenses/by/4.0/)
+See the repository for license information
 
 ---
