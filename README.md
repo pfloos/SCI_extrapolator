@@ -1,9 +1,9 @@
 [![License](https://img.shields.io/badge/License-CC%20BY%20SA%204.0-lightgrey)](https://creativecommons.org/licenses/by/4.0/)
-[![Last Update](https://img.shields.io/github/last-commit/pfloos/QUESTDB?label=last%20update)](https://github.com/pfloos/QUESTDB/commits/main)
+[![Last Update](https://img.shields.io/github/last-commit/pfloos/SCI_extrapolator?label=last%20update)](https://github.com/pfloos/SCI_extrapolator/commits/main)
 
-[![GitHub Repo stars](https://img.shields.io/github/stars/pfloos/QUESTDB?style=social)](https://github.com/pfloos/QUESTDB/stargazers)
-[![GitHub forks](https://img.shields.io/github/forks/pfloos/QUESTDB?style=social)](https://github.com/pfloos/QUESTDB/network/members)
-[![GitHub watchers](https://img.shields.io/github/watchers/pfloos/QUESTDB?style=social)](https://github.com/pfloos/QUESTDB/watchers)
+[![GitHub Repo stars](https://img.shields.io/github/stars/pfloos/SCI_extrapolator?style=social)](https://github.com/pfloos/SCI_extrapolator/stargazers)
+[![GitHub forks](https://img.shields.io/github/forks/pfloos/SCI_extrapolator?style=social)](https://github.com/pfloos/SCI_extrapolator/network/members)
+[![GitHub watchers](https://img.shields.io/github/watchers/pfloos/SCI_extrapolator?style=social)](https://github.com/pfloos/SCI_extrapolator/watchers)
 
 # Selected CI Extrapolation Tool
 
