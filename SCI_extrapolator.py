@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 SCI Extrapolator
-Extrapolate Selected CI energies to the complete basis set limit using rPT2.
+Extrapolate Selected CI energies to the Full CI limit using rPT2.
 """
 
 import sys
@@ -49,6 +49,181 @@ def colorize(text: str, color: str) -> str:
 
 
 # ============================================================
+# JSON Fixer Function
+# ============================================================
+
+def fix_json_file(filename: str, verbose: bool = True) -> str:
+    """
+    Attempt to fix common JSON issues, especially missing closing brackets/braces.
+    
+    Args:
+        filename: Path to the JSON file
+        verbose: Print progress messages
+        
+    Returns:
+        Path to the fixed JSON file
+    """
+    # Read the file
+    try:
+        with open(filename, 'r', encoding='utf-8') as f:
+            content = f.read()
+    except Exception as e:
+        print(f"Error reading file: {e}")
+        return filename
+    
+    if verbose:
+        print(f"Attempting to fix JSON file: {filename}")
+        print(f"Original file size: {len(content)} characters")
+    
+    # Try to parse as-is first
+    try:
+        json.loads(content)
+        if verbose:
+            print("✓ JSON is already valid!")
+        return filename
+    except json.JSONDecodeError as e:
+        if verbose:
+            print(f"JSON Error: {e}")
+            print(f"Error at line {e.lineno}, column {e.colno}")
+    
+    # Apply fixes
+    fixed_content = content
+    fixes_applied = []
+    
+    # 1. SPECIFIC FIX: Add missing closing brackets/braces for common patterns
+    # Check the last few characters to determine what's missing
+    # Common patterns: file ends with "}" or "]" or "}]" etc.
+    
+    # First, count all opens and closes
+    total_open_braces = fixed_content.count('{')
+    total_close_braces = fixed_content.count('}')
+    total_open_brackets = fixed_content.count('[')
+    total_close_brackets = fixed_content.count(']')
+    
+    missing_braces = total_open_braces - total_close_braces
+    missing_brackets = total_open_brackets - total_close_brackets
+    
+    if verbose:
+        print(f"Open braces: {total_open_braces}, Close braces: {total_close_braces}, Missing: {missing_braces}")
+        print(f"Open brackets: {total_open_brackets}, Close brackets: {total_close_brackets}, Missing: {missing_brackets}")
+    
+    # Build the closing string in the correct order
+    # Usually we need to close brackets first, then braces
+    closing_string = ""
+    
+    # Add closing brackets first (inner)
+    if missing_brackets > 0:
+        closing_string += ']' * missing_brackets
+        fixes_applied.append(f"Added {missing_brackets} closing brackets")
+        if verbose:
+            print(f"Added {missing_brackets} closing brackets")
+    
+    # Then add closing braces (outer)
+    if missing_braces > 0:
+        closing_string += '}' * missing_braces
+        fixes_applied.append(f"Added {missing_braces} closing braces")
+        if verbose:
+            print(f"Added {missing_braces} closing braces")
+    
+    # If we're missing both, add them in the correct order
+    if missing_braces == 0 and missing_brackets == 0:
+        # Sometimes the JSON is just missing the root closing brace
+        # Check if the file ends with ']' but not '}'
+        if fixed_content.rstrip().endswith(']'):
+            closing_string = '}'
+            fixes_applied.append("Added missing root closing brace")
+            if verbose:
+                print("Added missing root closing brace")
+        # Check if the file ends with '}' but not ']'
+        elif fixed_content.rstrip().endswith('}'):
+            # Need to check if there's an unclosed array
+            if total_open_brackets > total_close_brackets:
+                closing_string = ']'
+                fixes_applied.append("Added missing closing bracket")
+                if verbose:
+                    print("Added missing closing bracket")
+    
+    # Add the closing string
+    fixed_content += closing_string
+    
+    # 2. Remove trailing commas before ] or }
+    import re
+    fixed_content = re.sub(r',\s*([\]}])', r'\1', fixed_content)
+    
+    # 3. Fix unclosed strings
+    if fixed_content.rstrip().endswith('"'):
+        quote_count = fixed_content.count('"')
+        if quote_count % 2 == 1:
+            fixed_content += '"'
+            fixes_applied.append("Closed unclosed string")
+            if verbose:
+                print("Closed unclosed string")
+    
+    # 4. Remove BOM if present
+    if fixed_content.startswith('\ufeff'):
+        fixed_content = fixed_content[1:]
+        fixes_applied.append("Removed BOM")
+    
+    # 5. Try to parse after fixes
+    try:
+        data = json.loads(fixed_content)
+        if verbose:
+            print("✓ JSON is now valid!")
+            if fixes_applied:
+                print(f"Fixes applied: {', '.join(fixes_applied)}")
+    except json.JSONDecodeError as e:
+        if verbose:
+            print(f"✗ JSON is still invalid: {e}")
+            print(f"Error at line {e.lineno}, column {e.colno}")
+        
+        # Show context around the error
+        lines = fixed_content.split('\n')
+        if e.lineno <= len(lines):
+            start = max(0, e.lineno - 5)
+            end = min(len(lines), e.lineno + 3)
+            print("\nContext around error:")
+            for i in range(start, end):
+                prefix = ">>> " if i == e.lineno - 1 else "    "
+                print(f"{prefix}{i+1:4d}: {lines[i][:100]}")
+        
+        # If still failing, try the specific pattern: add "}]}" at the end
+        if verbose:
+            print("\nTrying specific fix: adding '}]}' at the end...")
+        
+        # Try adding the standard closing sequence
+        fixed_content = content + '}]}'  # Close array, close fci object, close root
+        fixes_applied.append("Added '}]}' at end")
+        
+        try:
+            data = json.loads(fixed_content)
+            if verbose:
+                print("✓ JSON is now valid with specific fix!")
+            # Save the fixed file
+            fixed_filename = filename + '.fixed'
+            with open(fixed_filename, 'w', encoding='utf-8') as f:
+                f.write(fixed_content)
+            if verbose:
+                print(f"Saved fixed file to: {fixed_filename}")
+            return fixed_filename
+        except json.JSONDecodeError as e2:
+            if verbose:
+                print(f"✗ Specific fix also failed: {e2}")
+            return filename
+    
+    # Save the fixed file
+    fixed_filename = filename + '.fixed'
+    try:
+        with open(fixed_filename, 'w', encoding='utf-8') as f:
+            f.write(fixed_content)
+        if verbose:
+            print(f"Saved fixed file to: {fixed_filename}")
+        return fixed_filename
+    except Exception as e:
+        print(f"Error saving fixed file: {e}")
+        return filename
+
+
+# ============================================================
 # Data Extraction
 # ============================================================
 
@@ -84,8 +259,11 @@ def load_data(filename: str) -> list[dict]:
     Returns:
         List of iterations sorted by number of determinants
     """
+    # Try to fix the JSON if needed
+    fixed_filename = fix_json_file(filename)
+    
     try:
-        with open(filename, 'r') as f:
+        with open(fixed_filename, 'r') as f:
             data = json.load(f)
     except (FileNotFoundError, json.JSONDecodeError) as e:
         print(f"Error loading file: {e}")
@@ -302,56 +480,42 @@ def print_summary(filename: str, iters: list[dict], n_states: int):
 def print_table(energies: list[float], errors: list[float], s2vals: dict):
     """
     Print a beautifully formatted table of extrapolated energies and excitations.
-    
-    Args:
-        energies: List of extrapolated total energies
-        errors: List of extrapolation errors
-        s2vals: Dictionary mapping state index to S2 value (from largest wave function)
     """
     E0 = energies[0]
     dE0 = errors[0]
     
-    # Define column widths (including padding)
+    # Column widths
     col_widths = {
-        'state': 6,      # width for state number
-        'spin': 10,      # width for spin label
-        's2': 10,        # width for S2 value
-        'energy': 16,    # width for total energy
-        'error': 14,     # width for energy error
-        'excitation': 14, # width for excitation energy
-        'exc_error': 14   # width for excitation error
+        'state': 6,
+        'spin': 10,
+        's2': 10,
+        'energy': 16,
+        'error': 14,
+        'excitation': 14,
+        'exc_error': 14
     }
     
-    # Calculate total width
-    total_width = sum(col_widths.values()) + 3 * 6  # 6 separators (│) with spaces
+    # Fixed width for the table
+    total_width = 98
     
-    # Print header with decoration
     print("\n" + colorize("═" * total_width, "CYAN"))
     print(colorize(" Extrapolated Excitation Energies ".center(total_width), "BOLD"))
     print(colorize("═" * total_width, "CYAN"))
     
-    # Print column headers with proper alignment
+    # Header
     header = (
-        f"{colorize('State', 'BOLD'):>{col_widths['state']}} │ "
-        f"{colorize('Spin', 'BOLD'):^{col_widths['spin']}} │ "
-        f"{colorize('<S²>', 'BOLD'):^{col_widths['s2']}} │ "
-        f"{colorize('E_total (Ha)', 'BOLD'):^{col_widths['energy']}} │ "
-        f"{colorize('σ(E) (Ha)', 'BOLD'):^{col_widths['error']}} │ "
-        f"{colorize('ΔE (eV)', 'BOLD'):^{col_widths['excitation']}} │ "
-        f"{colorize('σ(ΔE) (eV)', 'BOLD'):^{col_widths['exc_error']}}"
+        f"{colorize('State ', 'BOLD'):^6} │ "
+        f"{colorize('Spin      ', 'BOLD'):^10} │ "
+        f"{colorize('<S²>      ', 'BOLD'):^10} │ "
+        f"{colorize('E_tot (Ha)      ', 'BOLD'):^16} │ "
+        f"{colorize('σ(E) (Ha) ', 'BOLD'):^10} │ "
+        f"{colorize('ΔE (eV)       ', 'BOLD'):^14} │ "
+        f"{colorize('σ(ΔE) (eV)    ', 'BOLD'):^14}"
     )
     print(header)
     
-    # Print separator with proper widths
-    separator = (
-        "─" * col_widths['state'] + "┼" +
-        "─" * col_widths['spin'] + "┼" +
-        "─" * col_widths['s2'] + "┼" +
-        "─" * col_widths['energy'] + "┼" +
-        "─" * col_widths['error'] + "┼" +
-        "─" * col_widths['excitation'] + "┼" +
-        "─" * col_widths['exc_error']
-    )
+    # Separator
+    separator = "───────┼────────────┼────────────┼──────────────────┼────────────┼────────────────┼────────────────"
     print(colorize(separator, "DIM"))
     
     # Print each state
@@ -362,9 +526,6 @@ def print_table(energies: list[float], errors: list[float], s2vals: dict):
         s2 = s2vals.get(i, np.nan)
         spin = spin_label(s2)
         
-        # State label
-        state_label = f"{i:>3d}"
-        
         exc = (energies[i] - E0) * HA_TO_EV
         exc_err = np.sqrt(errors[i]**2 + dE0**2) * HA_TO_EV
         
@@ -372,7 +533,7 @@ def print_table(energies: list[float], errors: list[float], s2vals: dict):
         energy_str = f"{energies[i]:14.8f}" if not np.isnan(energies[i]) else "N/A"
         error_str = f"{errors[i]:10.3e}" if not np.isnan(errors[i]) else "N/A"
         
-        # Color only the error columns based on magnitude
+        # Color errors
         if not np.isnan(errors[i]):
             if errors[i] < 1e-4:
                 error_str = colorize(error_str, "GREEN")
@@ -392,25 +553,23 @@ def print_table(energies: list[float], errors: list[float], s2vals: dict):
         else:
             exc_err_str = "N/A"
         
-        # Format excitation
-        exc_str = f"{exc:10.3f}" if i >= 0 else "N/A"
+        exc_str = f"{exc:10.3f}"
         
-        # Print row with proper alignment
+        # Print row with fixed widths
         row = (
-            f"{state_label:>{col_widths['state']}} │ "
-            f"{spin:^{col_widths['spin']}} │ "
-            f"{s2:^{col_widths['s2']}.4f} │ "
-            f"{energy_str:^{col_widths['energy']}} │ "
-            f"{error_str:^{col_widths['error']}} │ "
-            f"{exc_str:^{col_widths['excitation']}} │ "
-            f"{exc_err_str:^{col_widths['exc_error']}}"
+            f"{i:>6} │ "
+            f"{spin:^10} │ "
+            f"{s2:10.4f} │ "
+            f"{energy_str:>16} │ "
+            f"{error_str:>14} │ "
+            f"{exc_str:>14} │ "
+            f"{exc_err_str:>14}"
         )
         print(row)
     
-    # Print footer
     print(colorize("═" * total_width, "CYAN"))
     
-    # Print legend for colored entries (only errors)
+    # Legend
     if USE_COLORS:
         print(f"\n{colorize('Error legend:', 'BOLD')} "
               f"{colorize('σ(E) < 1e-4', 'GREEN')} │ "
@@ -424,54 +583,19 @@ def print_table(energies: list[float], errors: list[float], s2vals: dict):
 def print_compact_table(energies: list[float], errors: list[float], s2vals: dict):
     """
     Print a compact table format suitable for inclusion in papers.
-    
-    Args:
-        energies: List of extrapolated total energies
-        errors: List of extrapolation errors
-        s2vals: Dictionary mapping state index to S2 value (from largest wave function)
     """
     E0 = energies[0]
     dE0 = errors[0]
     
-    # Define column widths
-    col_widths = {
-        'state': 6,
-        'spin': 10,
-        's2': 8,
-        'exc': 12,
-        'exc_err': 10,
-        'energy': 14
-    }
-    
-    total_width = sum(col_widths.values()) + 5 * 3  # separators
+    total_width = 60
     
     print("\n" + colorize("═" * total_width, "CYAN"))
     print(colorize(" Extrapolated Excitation Energies (Compact) ".center(total_width), "BOLD"))
     print(colorize("═" * total_width, "CYAN"))
     
-    # Header
-    header = (
-        f"{colorize('State', 'BOLD'):>{col_widths['state']}} │ "
-        f"{colorize('Spin', 'BOLD'):^{col_widths['spin']}} │ "
-        f"{colorize('<S²>', 'BOLD'):^{col_widths['s2']}} │ "
-        f"{colorize('ΔE (eV)', 'BOLD'):^{col_widths['exc']}} │ "
-        f"{colorize('σ(ΔE)', 'BOLD'):^{col_widths['exc_err']}} │ "
-        f"{colorize('E_tot (Ha)', 'BOLD'):^{col_widths['energy']}}"
-    )
-    print(header)
+    print(f"{'State':>6} {'Spin':^10} {'<S²>':^8} {'ΔE (eV)':^12} {'σ(ΔE)':^10} {'E_tot (Ha)':^14}")
+    print("─" * total_width)
     
-    # Separator
-    separator = (
-        "─" * col_widths['state'] + "┼" +
-        "─" * col_widths['spin'] + "┼" +
-        "─" * col_widths['s2'] + "┼" +
-        "─" * col_widths['exc'] + "┼" +
-        "─" * col_widths['exc_err'] + "┼" +
-        "─" * col_widths['energy']
-    )
-    print(colorize(separator, "DIM"))
-    
-    # Print each state
     for i in range(len(energies)):
         if np.isnan(energies[i]):
             continue
@@ -484,9 +608,8 @@ def print_compact_table(energies: list[float], errors: list[float], s2vals: dict
         
         energy_str = f"{energies[i]:14.8f}" if not np.isnan(energies[i]) else "N/A"
         
-        # Color only errors
         error_str = f"{exc_err:10.4f}" if i > 0 else f"{0.0:10.4f}"
-        if USE_COLORS:
+        if i > 0 and USE_COLORS:
             if exc_err < 0.01:
                 error_str = colorize(error_str, "GREEN")
             elif exc_err < 0.1:
@@ -494,16 +617,7 @@ def print_compact_table(energies: list[float], errors: list[float], s2vals: dict
             else:
                 error_str = colorize(error_str, "RED")
         
-        # Print row
-        row = (
-            f"{i:>{col_widths['state']}} │ "
-            f"{spin:^{col_widths['spin']}} │ "
-            f"{s2:^{col_widths['s2']}.4f} │ "
-            f"{exc:^{col_widths['exc']}.4f} │ "
-            f"{error_str:^{col_widths['exc_err']}} │ "
-            f"{energy_str:^{col_widths['energy']}}"
-        )
-        print(row)
+        print(f"{i:>6} {spin:^10} {s2:8.4f} {exc:12.4f} {error_str:>10} {energy_str:>14}")
     
     print(colorize("═" * total_width, "CYAN"))
 
@@ -515,10 +629,6 @@ def print_compact_table(energies: list[float], errors: list[float], s2vals: dict
 def compute(filename: str, compact: bool = False):
     """
     Main computation workflow.
-    
-    Args:
-        filename: Path to JSON data file
-        compact: If True, use compact table format
     """
     # Load and parse data
     iters = load_data(filename)
@@ -565,7 +675,6 @@ Example usage:
                        help="Disable colored output")
     args = parser.parse_args()
     
-    # Override color setting if requested
     if args.no_colors:
         USE_COLORS = False
     
