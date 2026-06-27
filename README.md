@@ -72,6 +72,8 @@ For each state:
 - `variance`: variance of the wave function
 - `ex_energy`: auxiliary state-dependent energies (used for matching)
 
+These JSON files are typically produced automatically by Quantum Package 2 (qp2) during CIPSI calculations. In a qp2 run they can be found under the `ezfio/json/` directory (e.g. `ezfio/json/00003.json`). If you use qp2, look in the calculation output directory for `ezfio/json` to locate the files this script expects. See the Quantum Package repository for more information: https://github.com/QuantumPackage/qp2
+
 ### 📋 Example JSON Structure
 
 ```json
