@@ -110,13 +110,13 @@ pip install numpy scipy
 ### Basic Command
 
 ```bash
-python3 extrap.py path/to/file.json
+python3 SCI_extrapolator.py path/to/file.json
 ```
 
 ### Example
 
 ```bash
-python3 extrap.py HF/aug-cc-pvdz/HF/json/00003.json
+python3 SCI_extrapolator.py HF/aug-cc-pvdz/HF/json/00003.json
 ```
 
 ### Included example output
@@ -157,7 +157,7 @@ You can use this example to check formatting, understand the output layout, or a
 To reproduce the included example output, run the script on the JSON file used for the run (named `00003.json` in the example). If you have the JSON in a folder such as `HF/.../json/00003.json`, run:
 
 ```bash
-python3 extrap.py path/to/00003.json > example/HF_aug-cc-pvtz.out
+python3 SCI_extrapolator.py path/to/00003.json > example/HF_aug-cc-pvtz.out
 ```
 
 Notes:
