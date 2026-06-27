@@ -119,6 +119,45 @@ python3 extrap.py path/to/file.json
 python3 extrap.py HF/aug-cc-pvdz/HF/json/00003.json
 ```
 
+### Included example output
+
+This repository also includes a sample run output file (human-readable log) at:
+
+```
+example/HF_aug-cc-pvtz.out
+```
+
+This file contains the script's run-time messages and a complete "Selected CI Extrapolation Summary" including the final extrapolated excitation energies table. You can view it on GitHub here:
+
+https://github.com/pfloos/SCI_extrapolator/blob/main/example/HF_aug-cc-pvtz.out
+
+A short excerpt from that file (truncated):
+
+```text
+Attempting to fix JSON file: 00003.json
+Original file size: 47833 characters
+✓ JSON is already valid!
+
+══════════════════════════════════════════════════════════════════
+                      Selected CI Extrapolation Summary
+══════════════════════════════════════════════════════════════════
+ File                           : 00003.json
+ Iterations                     : 9
+ States tracked                 : 12
+ Determinants                   :        513 →     299786
+ Extrapolation                  : linear fit of E_var vs rPT2
+ Fit points                     : 3 to 6 best (minimum residual)
+ Weights                        : 1 / rPT2²
+ State tracking                 : Hungarian matching (largest → smallest)
+ Matching metric                : E + S² + variance + ex_energy fingerprint
+ Spin assignment                : from largest wave function
+══════════════════════════════════════════════════════════════════
+
+... (final extrapolated excitation energies table follows)
+```
+
+You can use this example to check formatting, understand the output layout, or as a test input when adapting the parser for different workflows.
+
 ---
 
 ## 📈 Output
