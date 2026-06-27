@@ -131,32 +131,39 @@ This file contains the script's run-time messages and a complete "Selected CI Ex
 
 https://github.com/pfloos/SCI_extrapolator/blob/main/example/HF_aug-cc-pvtz.out
 
-A short excerpt from that file (truncated):
+Full results table from that run:
 
 ```text
-Attempting to fix JSON file: 00003.json
-Original file size: 47833 characters
-✓ JSON is already valid!
-
-══════════════════════════════════════════════════════════════════
-                      Selected CI Extrapolation Summary
-══════════════════════════════════════════════════════════════════
- File                           : 00003.json
- Iterations                     : 9
- States tracked                 : 12
- Determinants                   :        513 →     299786
- Extrapolation                  : linear fit of E_var vs rPT2
- Fit points                     : 3 to 6 best (minimum residual)
- Weights                        : 1 / rPT2²
- State tracking                 : Hungarian matching (largest → smallest)
- Matching metric                : E + S² + variance + ex_energy fingerprint
- Spin assignment                : from largest wave function
-══════════════════════════════════════════════════════════════════
-
-... (final extrapolated excitation energies table follows)
+State  │ Spin       │ <S²>       │ E_tot (Ha)       │ σ(E) (Ha)  │ ΔE (eV)        │ σ(ΔE) (eV)    
+───────┼────────────┼────────────┼──────────────────┼────────────┼───────────────┼───────────────
+     0 │  Singlet   │     0.0000 │    -100.34944779 │      1.880e-04 │          0.000 │          0.007
+     1 │  Triplet   │     2.0000 │     -99.97904441 │      1.386e-04 │         10.079 │          0.006
+     2 │  Triplet   │     2.0000 │     -99.97920699 │      2.619e-04 │         10.075 │          0.009
+     3 │  Singlet   │     0.0000 │     -99.96492204 │      9.306e-05 │         10.463 │          0.006
+     4 │  Singlet   │     0.0000 │     -99.96510648 │      2.629e-04 │         10.458 │          0.009
+     5 │  Triplet   │     2.0000 │     -99.85364321 │      2.075e-04 │         13.492 │          0.008
+     6 │  Triplet   │     2.0000 │     -99.84794625 │      2.973e-04 │         13.647 │          0.010
+     7 │  Triplet   │     2.0000 │     -99.84840278 │      3.136e-04 │         13.634 │          0.010
+     8 │  Singlet   │     0.0000 │     -99.84317336 │      1.005e-04 │         13.776 │          0.006
+     9 │  Singlet   │     0.0000 │     -99.84316692 │      5.240e-04 │         13.777 │          0.015
+    10 │  Triplet   │     2.0000 │     -99.83249307 │      1.395e-04 │         14.067 │          0.006
+    11 │  Triplet   │     2.0000 │     -99.82045549 │      1.668e-04 │         14.395 │          0.007
 ```
 
 You can use this example to check formatting, understand the output layout, or as a test input when adapting the parser for different workflows.
+
+### How to reproduce this example
+
+To reproduce the included example output, run the script on the JSON file used for the run (named `00003.json` in the example). If you have the JSON in a folder such as `HF/.../json/00003.json`, run:
+
+```bash
+python3 extrap.py path/to/00003.json > example/HF_aug-cc-pvtz.out
+```
+
+Notes:
+- The script prints human-readable logging messages; redirecting stdout (as shown) saves the full log to `example/HF_aug-cc-pvtz.out`.
+- The script may attempt to auto-correct common JSON issues and will print a small diagnostic header (e.g. "Attempting to fix JSON file: 00003.json").
+- If you prefer to inspect results interactively, omit the redirection and the summary table will be printed to the terminal.
 
 ---
 
