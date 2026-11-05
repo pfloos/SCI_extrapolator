@@ -182,11 +182,16 @@ def spin_label(s2: float) -> str:
     return min(SPIN_REFERENCES, key=lambda spin: abs(s2 - SPIN_REFERENCES[spin]))
 
 
-def track_states(iters: list[dict]) -> tuple[dict, dict]:
+def track_states(iters: list[dict], return_ndets: bool = False,
+                 return_indices: bool = False) -> tuple:
     """Match roots backwards, preserving reference IDs when root counts change.
 
     Each trajectory includes the largest SCI wave function. Unmatched roots
     cease at the iteration where they disappear, rather than being renumbered.
+
+    With return_ndets=True, also return the corresponding determinant counts
+    aligned one-to-one with each trajectory for plotting. With return_indices=True,
+    return original SCI iteration indices for exact same-iteration pairing.
     """
     final_states = iters[-1]["states"]
     trajectories = {
@@ -196,9 +201,12 @@ def track_states(iters: list[dict]) -> tuple[dict, dict]:
     spin_states = {
         root: float(state["s2"]) for root, state in enumerate(final_states)
     }
+    determinant_counts = {root: [iters[-1]["n_det"]] for root in trajectories}
+    iteration_indices = {root: [len(iters) - 1] for root in trajectories}
     active = [(root, fingerprint(state)) for root, state in enumerate(final_states)]
 
-    for iteration in reversed(iters[:-1]):
+    for index in range(len(iters) - 2, -1, -1):
+        iteration = iters[index]
         current_states = iteration["states"]
         current = [fingerprint(state) for state in current_states]
         if not active or not current:
@@ -213,12 +221,21 @@ def track_states(iters: list[dict]) -> tuple[dict, dict]:
             original_id = active[row][0]
             state = current_states[column]
             trajectories[original_id].append((float(state["rpt2"]), float(state["energy"])))
+            determinant_counts[original_id].append(iteration["n_det"])
+            iteration_indices[original_id].append(index)
             matched.append((original_id, current[column]))
         active = matched
 
-    for points in trajectories.values():
+    for root, points in trajectories.items():
         points.reverse()
-    return trajectories, spin_states
+        determinant_counts[root].reverse()
+        iteration_indices[root].reverse()
+    output = [trajectories, spin_states]
+    if return_ndets:
+        output.append(determinant_counts)
+    if return_indices:
+        output.append(iteration_indices)
+    return tuple(output)
 
 
 def _fit_window(points: np.ndarray) -> dict | None:
@@ -246,6 +263,7 @@ def _fit_window(points: np.ndarray) -> dict | None:
     intercept_variance = max(0.0, weighted_residual_variance * gram_inverse[0, 0])
     return {
         "energy": float(coeff[0]),
+        "slope": float(coeff[1] / np.max(np.abs(x))),
         "fit_uncertainty": float(math.sqrt(intercept_variance)),
         "rms_residual": float(np.sqrt(np.mean(residuals ** 2))),
     }
@@ -410,9 +428,25 @@ def print_fit_diagnostics(fits: list[dict | None]) -> None:
         )
 
 
-def compute(filename: str, compact: bool = False, diagnostics: bool = False):
+def compute(
+    filename: str, compact: bool = False, diagnostics: bool = False,
+    plot_pdf: str | None = None, plot_png_dir: str | None = None,
+    excitation: bool = False, excitation_plot_pdf: str | None = None,
+    excitation_plot_png_dir: str | None = None,
+):
     iterations = load_data(filename)
-    trajectories, spins = track_states(iterations)
+    wants_excitation = (excitation or excitation_plot_pdf is not None
+                        or excitation_plot_png_dir is not None)
+    wants_ndets = plot_pdf is not None or plot_png_dir is not None
+    matched = track_states(iterations, return_ndets=wants_ndets,
+                           return_indices=wants_excitation)
+    trajectories, spins = matched[:2]
+    offset = 2
+    if wants_ndets:
+        determinant_counts = matched[offset]
+        offset += 1
+    if wants_excitation:
+        iteration_indices = matched[offset]
     fits = [extrapolate(trajectories[root], details=True) for root in range(len(trajectories))]
     energies = [fit["energy"] if fit is not None else float("nan") for fit in fits]
     errors = [fit["uncertainty"] if fit is not None else float("nan") for fit in fits]
@@ -423,6 +457,36 @@ def compute(filename: str, compact: bool = False, diagnostics: bool = False):
         print_table(energies, errors, spins)
     if diagnostics or not compact:
         print_fit_diagnostics(fits)
+    if wants_excitation:
+        from sci_excitation import compute_excitation_models, print_excitation_results
+        excitation_models = compute_excitation_models(trajectories, iteration_indices, energies)
+        print_excitation_results(excitation_models)
+        if excitation_plot_pdf is not None or excitation_plot_png_dir is not None:
+            try:
+                from sci_excitation_plotting import write_excitation_plots
+            except ImportError as error:
+                raise ValueError(
+                    "Excitation plots require Matplotlib: python3 -m pip install matplotlib"
+                ) from error
+            created = write_excitation_plots(
+                excitation_models, pdf_path=excitation_plot_pdf,
+                png_dir=excitation_plot_png_dir,
+            )
+            for path in created:
+                print(f"Excitation plot saved: {path}")
+    if plot_pdf is not None or plot_png_dir is not None:
+        try:
+            from sci_plotting import write_plots
+        except ImportError as error:
+            raise ValueError(
+                "Plotting requires Matplotlib: python3 -m pip install matplotlib"
+            ) from error
+        created = write_plots(
+            trajectories, determinant_counts, spins, fits,
+            pdf_path=plot_pdf, png_dir=plot_png_dir,
+        )
+        for path in created:
+            print(f"Plot saved: {path}")
     return energies, errors, fits
 
 
@@ -440,13 +504,80 @@ def main(argv=None) -> int:
     parser.add_argument("--compact", "-c", action="store_true", help="Compact paper-style table")
     parser.add_argument("--diagnostics", action="store_true", help="Show individual fit diagnostics")
     parser.add_argument("--no-colors", action="store_true", help="Disable terminal colors")
+    parser.add_argument(
+        "--excitation", action="store_true",
+        help="Compare exploratory paired-state excitation extrapolations with default gaps",
+    )
+    parser.add_argument(
+        "--plot-excitation", action="store_true",
+        help="Save a multipage PDF comparing direct and corrected excitation fits",
+    )
+    parser.add_argument(
+        "--excitation-plot-output", metavar="FILE.pdf", default=None,
+        help="Excitation PDF destination; implies --plot-excitation",
+    )
+    parser.add_argument(
+        "--excitation-plot-png", action="store_true",
+        help="Also write comparison and individual excitation plots as PNG",
+    )
+    parser.add_argument(
+        "--excitation-plot-dir", metavar="DIRECTORY", default=None,
+        help="Excitation PNG directory; implies --excitation-plot-png",
+    )
+    parser.add_argument(
+        "--plot", action="store_true",
+        help="Save a multipage PDF (overview + one detailed page per state)",
+    )
+    parser.add_argument(
+        "--plot-output", type=str, default=None, metavar="FILE.pdf",
+        help="PDF destination; implies --plot (default: <input>_SCI_extrapolations.pdf)",
+    )
+    parser.add_argument(
+        "--plot-png", action="store_true",
+        help="Also save an overview and individual state plots as PNG files",
+    )
+    parser.add_argument(
+        "--plot-dir", type=str, default=None, metavar="DIRECTORY",
+        help="PNG directory; implies --plot-png (default: <input>_SCI_plots/)",
+    )
     args = parser.parse_args(argv)
     global USE_COLORS
     if args.no_colors:
         USE_COLORS = False
     try:
-        compute(args.filename, compact=args.compact, diagnostics=args.diagnostics)
-    except (ValueError, np.linalg.LinAlgError) as error:
+        from pathlib import Path
+        input_path = Path(args.filename)
+        pdf = None
+        png_dir = None
+        if args.plot or args.plot_output is not None:
+            pdf = args.plot_output or str(
+                input_path.with_name(input_path.stem + "_SCI_extrapolations.pdf")
+            )
+            if Path(pdf).suffix.lower() != ".pdf":
+                raise ValueError("--plot-output must end with .pdf")
+        if args.plot_png or args.plot_dir is not None:
+            png_dir = args.plot_dir or str(
+                input_path.with_name(input_path.stem + "_SCI_plots")
+            )
+        excitation_pdf = None
+        excitation_png = None
+        if args.plot_excitation or args.excitation_plot_output is not None:
+            excitation_pdf = args.excitation_plot_output or str(
+                input_path.with_name(input_path.stem + "_SCI_excitation_comparison.pdf")
+            )
+            if Path(excitation_pdf).suffix.lower() != ".pdf":
+                raise ValueError("--excitation-plot-output must end with .pdf")
+        if args.excitation_plot_png or args.excitation_plot_dir is not None:
+            excitation_png = args.excitation_plot_dir or str(
+                input_path.with_name(input_path.stem + "_SCI_excitation_plots")
+            )
+        compute(
+            args.filename, compact=args.compact, diagnostics=args.diagnostics,
+            plot_pdf=pdf, plot_png_dir=png_dir,
+            excitation=args.excitation, excitation_plot_pdf=excitation_pdf,
+            excitation_plot_png_dir=excitation_png,
+        )
+    except (ValueError, OSError, np.linalg.LinAlgError) as error:
         print(f"SCI extrapolation error: {error}", file=sys.stderr)
         return 1
     return 0
