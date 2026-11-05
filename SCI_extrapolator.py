@@ -1,681 +1,456 @@
 #!/usr/bin/env python3
-"""
-SCI Extrapolator
-Extrapolate Selected CI energies to the Full CI limit using rPT2.
+"""Extrapolate selected-CI energies to the FCI limit of a fixed orbital basis.
+
+The reported ``u`` values are heuristic extrapolation-stability indicators,
+not calibrated statistical standard deviations or confidence intervals.
 """
 
-import sys
-import json
 import argparse
+import json
+import math
+import sys
+
 import numpy as np
 from scipy.optimize import linear_sum_assignment
 
-# Constants
 HA_TO_EV = 27.211386245988
 SPIN_REFERENCES = {
     "Singlet": 0.0,
     "Doublet": 0.75,
     "Triplet": 2.0,
     "Quartet": 3.75,
-    "Quintet": 6.0
+    "Quintet": 6.0,
 }
-
-# ANSI color codes for terminal output (optional)
 COLORS = {
-    "HEADER": '\033[95m',
-    "BLUE": '\033[94m',
-    "CYAN": '\033[96m',
-    "GREEN": '\033[92m',
-    "YELLOW": '\033[93m',
-    "RED": '\033[91m',
-    "BOLD": '\033[1m',
-    "UNDERLINE": '\033[4m',
-    "END": '\033[0m',
-    "DIM": '\033[2m'
+    "HEADER": "\033[95m", "BLUE": "\033[94m", "CYAN": "\033[96m",
+    "GREEN": "\033[92m", "YELLOW": "\033[93m", "RED": "\033[91m",
+    "BOLD": "\033[1m", "END": "\033[0m", "DIM": "\033[2m",
 }
-
-# Try to determine if we're in a terminal that supports colors
-try:
-    USE_COLORS = sys.stdout.isatty()
-except:
-    USE_COLORS = False
+USE_COLORS = sys.stdout.isatty()
 
 
 def colorize(text: str, color: str) -> str:
-    """Apply color to text if terminal supports it."""
     if USE_COLORS and color in COLORS:
         return f"{COLORS[color]}{text}{COLORS['END']}"
     return text
 
 
-# ============================================================
-# JSON Fixer Function
-# ============================================================
+def _close_truncated_json(content: str) -> str:
+    """Repair only an incomplete JSON suffix, without changing completed data.
+
+    Brackets inside strings are ignored. Malformed inner structure, dangling
+    strings and mismatched closing brackets are deliberately not repaired.
+    """
+    stack = []
+    in_string = False
+    escape = False
+    for char in content:
+        if in_string:
+            if escape:
+                escape = False
+            elif char == "\\":
+                escape = True
+            elif char == '"':
+                in_string = False
+        elif char == '"':
+            in_string = True
+        elif char in "{[":
+            stack.append(char)
+        elif char in "}]":
+            if not stack or stack.pop() != {"}": "{", "]": "["}[char]:
+                raise ValueError("Mismatched JSON closing bracket")
+    if in_string:
+        raise ValueError("Truncated JSON ends inside a string; refusing repair")
+    if not stack:
+        raise ValueError("Invalid JSON with no unclosed containers; refusing repair")
+
+    # A trailing comma after the last *complete* item is safe to remove.
+    text = content.rstrip()
+    if text.endswith(","):
+        text = text[:-1].rstrip()
+    return text + "".join("}" if opening == "{" else "]" for opening in reversed(stack))
+
 
 def fix_json_file(filename: str, verbose: bool = True) -> str:
+    """Return a valid JSON path, optionally writing a conservatively repaired copy.
+
+    The original input is never modified. An unrecoverable file raises ValueError
+    rather than silently returning the broken original.
     """
-    Attempt to fix common JSON issues, especially missing closing brackets/braces.
-    
-    Args:
-        filename: Path to the JSON file
-        verbose: Print progress messages
-        
-    Returns:
-        Path to the fixed JSON file
-    """
-    # Read the file
-    try:
-        with open(filename, 'r', encoding='utf-8') as f:
-            content = f.read()
-    except Exception as e:
-        print(f"Error reading file: {e}")
-        return filename
-    
-    if verbose:
-        print(f"Attempting to fix JSON file: {filename}")
-        print(f"Original file size: {len(content)} characters")
-    
-    # Try to parse as-is first
+    with open(filename, "r", encoding="utf-8-sig") as handle:
+        content = handle.read()
     try:
         json.loads(content)
         if verbose:
-            print("✓ JSON is already valid!")
+            print(f"JSON validated: {filename}")
         return filename
-    except json.JSONDecodeError as e:
-        if verbose:
-            print(f"JSON Error: {e}")
-            print(f"Error at line {e.lineno}, column {e.colno}")
-    
-    # Apply fixes
-    fixed_content = content
-    fixes_applied = []
-    
-    # 1. SPECIFIC FIX: Add missing closing brackets/braces for common patterns
-    # Check the last few characters to determine what's missing
-    # Common patterns: file ends with "}" or "]" or "}]" etc.
-    
-    # First, count all opens and closes
-    total_open_braces = fixed_content.count('{')
-    total_close_braces = fixed_content.count('}')
-    total_open_brackets = fixed_content.count('[')
-    total_close_brackets = fixed_content.count(']')
-    
-    missing_braces = total_open_braces - total_close_braces
-    missing_brackets = total_open_brackets - total_close_brackets
-    
-    if verbose:
-        print(f"Open braces: {total_open_braces}, Close braces: {total_close_braces}, Missing: {missing_braces}")
-        print(f"Open brackets: {total_open_brackets}, Close brackets: {total_close_brackets}, Missing: {missing_brackets}")
-    
-    # Build the closing string in the correct order
-    # Usually we need to close brackets first, then braces
-    closing_string = ""
-    
-    # Add closing brackets first (inner)
-    if missing_brackets > 0:
-        closing_string += ']' * missing_brackets
-        fixes_applied.append(f"Added {missing_brackets} closing brackets")
-        if verbose:
-            print(f"Added {missing_brackets} closing brackets")
-    
-    # Then add closing braces (outer)
-    if missing_braces > 0:
-        closing_string += '}' * missing_braces
-        fixes_applied.append(f"Added {missing_braces} closing braces")
-        if verbose:
-            print(f"Added {missing_braces} closing braces")
-    
-    # If we're missing both, add them in the correct order
-    if missing_braces == 0 and missing_brackets == 0:
-        # Sometimes the JSON is just missing the root closing brace
-        # Check if the file ends with ']' but not '}'
-        if fixed_content.rstrip().endswith(']'):
-            closing_string = '}'
-            fixes_applied.append("Added missing root closing brace")
-            if verbose:
-                print("Added missing root closing brace")
-        # Check if the file ends with '}' but not ']'
-        elif fixed_content.rstrip().endswith('}'):
-            # Need to check if there's an unclosed array
-            if total_open_brackets > total_close_brackets:
-                closing_string = ']'
-                fixes_applied.append("Added missing closing bracket")
-                if verbose:
-                    print("Added missing closing bracket")
-    
-    # Add the closing string
-    fixed_content += closing_string
-    
-    # 2. Remove trailing commas before ] or }
-    import re
-    fixed_content = re.sub(r',\s*([\]}])', r'\1', fixed_content)
-    
-    # 3. Fix unclosed strings
-    if fixed_content.rstrip().endswith('"'):
-        quote_count = fixed_content.count('"')
-        if quote_count % 2 == 1:
-            fixed_content += '"'
-            fixes_applied.append("Closed unclosed string")
-            if verbose:
-                print("Closed unclosed string")
-    
-    # 4. Remove BOM if present
-    if fixed_content.startswith('\ufeff'):
-        fixed_content = fixed_content[1:]
-        fixes_applied.append("Removed BOM")
-    
-    # 5. Try to parse after fixes
-    try:
-        data = json.loads(fixed_content)
-        if verbose:
-            print("✓ JSON is now valid!")
-            if fixes_applied:
-                print(f"Fixes applied: {', '.join(fixes_applied)}")
-    except json.JSONDecodeError as e:
-        if verbose:
-            print(f"✗ JSON is still invalid: {e}")
-            print(f"Error at line {e.lineno}, column {e.colno}")
-        
-        # Show context around the error
-        lines = fixed_content.split('\n')
-        if e.lineno <= len(lines):
-            start = max(0, e.lineno - 5)
-            end = min(len(lines), e.lineno + 3)
-            print("\nContext around error:")
-            for i in range(start, end):
-                prefix = ">>> " if i == e.lineno - 1 else "    "
-                print(f"{prefix}{i+1:4d}: {lines[i][:100]}")
-        
-        # If still failing, try the specific pattern: add "}]}" at the end
-        if verbose:
-            print("\nTrying specific fix: adding '}]}' at the end...")
-        
-        # Try adding the standard closing sequence
-        fixed_content = content + '}]}'  # Close array, close fci object, close root
-        fixes_applied.append("Added '}]}' at end")
-        
+    except json.JSONDecodeError as original_error:
         try:
-            data = json.loads(fixed_content)
-            if verbose:
-                print("✓ JSON is now valid with specific fix!")
-            # Save the fixed file
-            fixed_filename = filename + '.fixed'
-            with open(fixed_filename, 'w', encoding='utf-8') as f:
-                f.write(fixed_content)
-            if verbose:
-                print(f"Saved fixed file to: {fixed_filename}")
-            return fixed_filename
-        except json.JSONDecodeError as e2:
-            if verbose:
-                print(f"✗ Specific fix also failed: {e2}")
-            return filename
-    
-    # Save the fixed file
-    fixed_filename = filename + '.fixed'
-    try:
-        with open(fixed_filename, 'w', encoding='utf-8') as f:
-            f.write(fixed_content)
-        if verbose:
-            print(f"Saved fixed file to: {fixed_filename}")
-        return fixed_filename
-    except Exception as e:
-        print(f"Error saving fixed file: {e}")
-        return filename
+            fixed = _close_truncated_json(content)
+            json.loads(fixed)
+        except (json.JSONDecodeError, ValueError) as error:
+            raise ValueError(
+                f"Invalid JSON ({original_error}). Automatic suffix repair failed: {error}"
+            ) from original_error
 
+    target = filename + ".fixed"
+    with open(target, "w", encoding="utf-8") as handle:
+        handle.write(fixed)
+    if verbose:
+        print(f"WARNING: recovered incomplete JSON suffix; check {target}")
+    return target
 
-# ============================================================
-# Data Extraction
-# ============================================================
 
 def extract_iterations(obj: dict | list) -> list[dict]:
-    """
-    Recursively extract all dictionaries containing 'states' and 'n_det'.
-    
-    Args:
-        obj: Dictionary or list to search through
-        
-    Returns:
-        List of iteration dictionaries
-    """
-    out = []
+    """Recursively collect records containing both 'states' and 'n_det'."""
     if isinstance(obj, dict):
-        if "states" in obj and "n_det" in obj:
-            out.append(obj)
-        for v in obj.values():
-            out.extend(extract_iterations(v))
-    elif isinstance(obj, list):
-        for v in obj:
-            out.extend(extract_iterations(v))
-    return out
+        result = [obj] if "states" in obj and "n_det" in obj else []
+        for value in obj.values():
+            result.extend(extract_iterations(value))
+        return result
+    if isinstance(obj, list):
+        return [entry for value in obj for entry in extract_iterations(value)]
+    return []
+
+
+def _validate_iterations(iterations: list[dict]) -> None:
+    if not iterations:
+        raise ValueError("No SCI iterations with 'n_det' and 'states' found")
+    for step, record in enumerate(iterations):
+        ndet = record["n_det"]
+        if isinstance(ndet, bool) or not isinstance(ndet, int) or ndet <= 0:
+            raise ValueError(f"Iteration {step}: n_det must be a positive integer")
+        states = record["states"]
+        if not isinstance(states, list) or not states:
+            raise ValueError(f"Iteration {step}: 'states' must be a nonempty list")
+        for root, state in enumerate(states):
+            if not isinstance(state, dict):
+                raise ValueError(f"Iteration {step}, state {root}: expected an object")
+            for key in ("energy", "rpt2", "s2", "variance"):
+                try:
+                    number = float(state[key])
+                except (KeyError, TypeError, ValueError) as error:
+                    raise ValueError(
+                        f"Iteration {step}, state {root}: missing/invalid {key}"
+                    ) from error
+                if not math.isfinite(number):
+                    raise ValueError(f"Iteration {step}, state {root}: nonfinite {key}")
+            excitation_fingerprint = state.get("ex_energy", [])
+            if not isinstance(excitation_fingerprint, list) or not all(
+                isinstance(value, (int, float)) and math.isfinite(value)
+                for value in excitation_fingerprint
+            ):
+                raise ValueError(f"Iteration {step}, state {root}: invalid ex_energy")
 
 
 def load_data(filename: str) -> list[dict]:
-    """
-    Load and parse JSON data, returning sorted CI iterations.
-    
-    Args:
-        filename: Path to JSON file
-        
-    Returns:
-        List of iterations sorted by number of determinants
-    """
-    # Try to fix the JSON if needed
-    fixed_filename = fix_json_file(filename)
-    
+    """Load validated SCI records sorted by number of determinants."""
     try:
-        with open(fixed_filename, 'r') as f:
-            data = json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError) as e:
-        print(f"Error loading file: {e}")
-        sys.exit(1)
+        path = fix_json_file(filename)
+        with open(path, "r", encoding="utf-8-sig") as handle:
+            data = json.load(handle)
+        iterations = extract_iterations(data)
+        _validate_iterations(iterations)
+    except (OSError, ValueError, json.JSONDecodeError) as error:
+        raise ValueError(f"Cannot load SCI data from {filename}: {error}") from error
+    iterations.sort(key=lambda item: item["n_det"])
+    return iterations
 
-    iters = extract_iterations(data)
-    if not iters:
-        print("No valid CI iterations found in the file.")
-        sys.exit(1)
-    
-    # Sort by number of determinants (smallest to largest)
-    iters.sort(key=lambda x: x.get("n_det", 0))
-    return iters
-
-
-# ============================================================
-# Fingerprint for State Matching
-# ============================================================
 
 def fingerprint(state: dict) -> dict:
-    """
-    Create a fingerprint dictionary for a single state.
-    
-    Args:
-        state: State dictionary from JSON
-        
-    Returns:
-        Dictionary containing energy, S2, variance, and excitation energies
-    """
     return {
-        "energy": state.get("energy", 0.0),
-        "s2": state.get("s2", 0.0),
-        "variance": state.get("variance", 0.0),
-        "ex": np.array(state.get("ex_energy", []), dtype=float),
+        "energy": float(state["energy"]),
+        "s2": float(state["s2"]),
+        "variance": float(state["variance"]),
+        "ex": np.asarray(state.get("ex_energy", []), dtype=float),
     }
 
 
 def distance(a: dict, b: dict) -> float:
-    """
-    Calculate distance metric between two state fingerprints.
-    
-    Args:
-        a: First fingerprint
-        b: Second fingerprint
-        
-    Returns:
-        Distance metric (lower = more similar)
-    """
+    """Original heuristic matching metric, kept for compatibility."""
     energy_diff = abs(a["energy"] - b["energy"])
     s2_diff = abs(a["s2"] - b["s2"])
     variance_diff = abs(a["variance"] - b["variance"])
+    size = min(len(a["ex"]), len(b["ex"]))
+    ex_diff = np.linalg.norm(a["ex"][:size] - b["ex"][:size]) if size else 0.0
+    return float(energy_diff + 0.1 * s2_diff + 0.1 * variance_diff + 0.5 * ex_diff)
 
-    # Compare excitation energies up to the minimum length
-    ex_diff = 0.0
-    if len(a["ex"]) and len(b["ex"]):
-        min_len = min(len(a["ex"]), len(b["ex"]))
-        ex_diff = np.linalg.norm(a["ex"][:min_len] - b["ex"][:min_len])
-
-    return energy_diff + 0.1 * s2_diff + 0.1 * variance_diff + 0.5 * ex_diff
-
-
-# ============================================================
-# Spin Label
-# ============================================================
 
 def spin_label(s2: float) -> str:
-    """
-    Return the spin label closest to the given S2 value.
-    
-    Args:
-        s2: S2 value
-        
-    Returns:
-        Spin label (Singlet, Doublet, etc.)
-    """
-    return min(SPIN_REFERENCES, key=lambda x: abs(s2 - SPIN_REFERENCES[x]))
+    if not math.isfinite(s2):
+        return "Unknown"
+    return min(SPIN_REFERENCES, key=lambda spin: abs(s2 - SPIN_REFERENCES[spin]))
 
-
-# ============================================================
-# State Tracking
-# ============================================================
 
 def track_states(iters: list[dict]) -> tuple[dict, dict]:
+    """Match roots backwards, preserving reference IDs when root counts change.
+
+    Each trajectory includes the largest SCI wave function. Unmatched roots
+    cease at the iteration where they disappear, rather than being renumbered.
     """
-    Track states from largest to smallest CI expansion using Hungarian matching.
-    
-    Args:
-        iters: List of iteration dictionaries (sorted by n_det)
-        
-    Returns:
-        trajectories: Dictionary mapping state index to list of (rPT2, energy) points
-        spin_states: Dictionary mapping state index to S2 value from largest iteration
-    """
-    # Start with the largest wave function (most accurate)
-    ref = [fingerprint(s) for s in iters[-1]["states"]]
-    n_states = len(ref)
-    
-    trajectories = {i: [] for i in range(n_states)}
-    
-    # Store S2 values from the largest (most accurate) wave function
-    spin_states = {}
-    for i, state in enumerate(iters[-1]["states"]):
-        spin_states[i] = state.get("s2", 0.0)
-    
-    # Start from the largest and work backwards to the smallest
-    prev = ref
-    
-    # Iterate from second-largest to smallest
-    for idx in range(len(iters) - 2, -1, -1):
-        curr = [fingerprint(s) for s in iters[idx]["states"]]
-        
-        # Cost matrix: compare previous (larger) to current (smaller)
-        C = np.zeros((len(prev), len(curr)))
-        for i in range(len(prev)):
-            for j in range(len(curr)):
-                C[i, j] = distance(prev[i], curr[j])
-        
-        # Hungarian matching to find best state correspondences
-        row_indices, col_indices = linear_sum_assignment(C)
-        
-        # Store the trajectory for this state
-        for i, j in zip(row_indices, col_indices):
-            rpt2_val = iters[idx]["states"][j].get("rpt2", 0.0)
-            energy_val = iters[idx]["states"][j].get("energy", np.nan)
-            trajectories[i].append((rpt2_val, energy_val))
-        
-        # Update reference to the current (smaller) wave function
-        prev = [curr[j] for _, j in zip(row_indices, col_indices)]
-    
-    # Each trajectory now has points from largest to smallest rPT2
-    # Reverse to get smallest to largest for extrapolation
-    for i in range(n_states):
-        trajectories[i].reverse()
-    
+    final_states = iters[-1]["states"]
+    trajectories = {
+        root: [(float(state["rpt2"]), float(state["energy"]))]
+        for root, state in enumerate(final_states)
+    }
+    spin_states = {
+        root: float(state["s2"]) for root, state in enumerate(final_states)
+    }
+    active = [(root, fingerprint(state)) for root, state in enumerate(final_states)]
+
+    for iteration in reversed(iters[:-1]):
+        current_states = iteration["states"]
+        current = [fingerprint(state) for state in current_states]
+        if not active or not current:
+            break
+        costs = np.array(
+            [[distance(previous, state) for state in current] for _, previous in active],
+            dtype=float,
+        )
+        rows, columns = linear_sum_assignment(costs)
+        matched = []
+        for row, column in zip(rows, columns):
+            original_id = active[row][0]
+            state = current_states[column]
+            trajectories[original_id].append((float(state["rpt2"]), float(state["energy"])))
+            matched.append((original_id, current[column]))
+        active = matched
+
+    for points in trajectories.values():
+        points.reverse()
     return trajectories, spin_states
 
 
-# ============================================================
-# Extrapolation
-# ============================================================
+def _fit_window(points: np.ndarray) -> dict | None:
+    """WLS with objective sum((residual / abs(rPT2))**2).
 
-def extrapolate(points: list[tuple]) -> tuple | None:
+    The weight is a heuristic emphasis on the converged points, not a measured
+    error variance. The intercept covariance is therefore only conditional.
     """
-    Extrapolate energy to zero rPT2 using a weighted linear fit.
-    
-    Args:
-        points: List of (rPT2, energy) tuples
-        
-    Returns:
-        (E0, error) tuple or None if insufficient points
-    """
-    # Sort by absolute rPT2 value (smallest first)
-    points_sorted = sorted(points, key=lambda x: abs(x[0]))
-    if len(points_sorted) < 3:
+    x = points[:, 0]
+    y = points[:, 1]
+    if len(x) < 3 or np.any(x == 0):
         return None
-    
-    best_fit = None
-    # Try fits with 3 to 6 points (or up to the available points)
-    max_points = min(6, len(points_sorted))
-    
-    for k in range(3, max_points + 1):
-        sub_points = np.array(points_sorted[:k])
-        x = sub_points[:, 0].astype(float)
-        y = sub_points[:, 1].astype(float)
-        
-        # Weights: 1 / rPT2² (gives more weight to smaller rPT2 values)
-        weights = 1.0 / (x ** 2)
-        # Weighted linear fit
-        p = np.polyfit(x, y, 1, w=weights)
-        y_fit = np.polyval(p, x)
-        # Error estimate: standard deviation of residuals
-        fit_error = np.std(y - y_fit)
-        e0 = p[1]  # Intercept (E at rPT2 = 0)
-        
-        if best_fit is None or fit_error < best_fit[1]:
-            best_fit = (e0, fit_error)
-    
-    return best_fit
+    scaled_x = x / np.max(np.abs(x))
+    design = np.column_stack((np.ones(len(x)), scaled_x))
+    w = np.min(np.abs(x)) / np.abs(x)  # same optimum as w=1/abs(x), stable scale
+    weighted_design = design * w[:, None]
+    weighted_y = y * w
+    coeff, _, rank, _ = np.linalg.lstsq(weighted_design, weighted_y, rcond=None)
+    if rank != 2 or np.linalg.cond(weighted_design) > 1e12:
+        return None
+    residuals = y - design @ coeff
+    dof = len(x) - 2
+    weighted_residual_variance = float(np.sum((w * residuals) ** 2) / dof)
+    gram_inverse = np.linalg.inv(weighted_design.T @ weighted_design)
+    intercept_variance = max(0.0, weighted_residual_variance * gram_inverse[0, 0])
+    return {
+        "energy": float(coeff[0]),
+        "fit_uncertainty": float(math.sqrt(intercept_variance)),
+        "rms_residual": float(np.sqrt(np.mean(residuals ** 2))),
+    }
 
 
-# ============================================================
-# Pretty Print Functions
-# ============================================================
+def extrapolate(points: list[tuple], details: bool = False) -> tuple | dict | None:
+    """Weighted linear extrapolation using a fixed window and window sensitivity.
 
-def print_summary(filename: str, iters: list[dict], n_states: int):
+    Primary result: 5 points with the smallest absolute rPT2 (or 3/4 if fewer).
+    Diagnostic fits: 3 through 6 points. The reported uncertainty indicator is
+    max(primary fit's residual-based intercept error, maximum difference between
+    the primary intercept and any diagnostic-window intercept). It is *not* a
+    calibrated 1-sigma statistical uncertainty.
+
+    By default returns (energy, indicator), preserving the prior public API.
+    Set details=True to also obtain all fit diagnostics.
     """
-    Print a summary of the extrapolation setup.
-    
-    Args:
-        filename: Input file name
-        iters: List of iterations
-        n_states: Number of states tracked
-    """
-    ndets = [it["n_det"] for it in iters]
-    
+    finite_points = []
+    for x, y in points:
+        if not (math.isfinite(x) and math.isfinite(y)):
+            raise ValueError("Nonfinite energy or rPT2 in extrapolation input")
+        finite_points.append((float(x), float(y)))
+    if not finite_points:
+        return None
+    exact = [y for x, y in finite_points if x == 0.0]
+    if exact:
+        if np.ptp(exact) > 1e-9:
+            raise ValueError("Inconsistent energies at zero rPT2")
+        result = {
+            "energy": float(np.mean(exact)), "uncertainty": 0.0,
+            "fit_uncertainty": 0.0, "window_sensitivity": 0.0,
+            "n_points": len(finite_points), "fit_points": 1,
+            "windows": {}, "direct_zero": True,
+        }
+        return result if details else (result["energy"], result["uncertainty"])
+    if len(finite_points) < 3:
+        return None
+
+    sorted_points = np.asarray(
+        sorted(finite_points, key=lambda pair: abs(pair[0])), dtype=float
+    )
+    windows = {}
+    for k in range(3, min(6, len(sorted_points)) + 1):
+        result = _fit_window(sorted_points[:k])
+        if result is not None:
+            windows[k] = result
+    if not windows:
+        return None
+    primary_k = min(windows, key=lambda k: (abs(k - 5), -k))
+    primary = windows[primary_k]
+    window_sensitivity = max(
+        abs(candidate["energy"] - primary["energy"]) for candidate in windows.values()
+    )
+    uncertainty = max(primary["fit_uncertainty"], window_sensitivity)
+    result = {
+        "energy": primary["energy"], "uncertainty": uncertainty,
+        "fit_uncertainty": primary["fit_uncertainty"],
+        "window_sensitivity": window_sensitivity,
+        "n_points": len(finite_points), "fit_points": primary_k,
+        "windows": windows, "direct_zero": False,
+    }
+    return result if details else (result["energy"], result["uncertainty"])
+
+
+def print_summary(filename: str, iters: list[dict], n_states: int) -> None:
+    ndets = [record["n_det"] for record in iters]
     print("\n" + colorize("═" * 78, "CYAN"))
     print(colorize(" Selected CI Extrapolation Summary ".center(78), "BOLD"))
     print(colorize("═" * 78, "CYAN"))
-    
-    print(f" {colorize('File', 'BOLD'):<30} : {filename}")
-    print(f" {colorize('Iterations', 'BOLD'):<30} : {len(iters)}")
-    print(f" {colorize('States tracked', 'BOLD'):<30} : {n_states}")
-    print(f" {colorize('Determinants', 'BOLD'):<30} : {min(ndets):>10d} → {max(ndets):>10d}")
-    print(f" {colorize('Extrapolation', 'BOLD'):<30} : linear fit of E_var vs rPT2")
-    print(f" {colorize('Fit points', 'BOLD'):<30} : 3 to 6 best (minimum residual)")
-    print(f" {colorize('Weights', 'BOLD'):<30} : 1 / rPT2²")
-    print(f" {colorize('State tracking', 'BOLD'):<30} : Hungarian matching (largest → smallest)")
-    print(f" {colorize('Matching metric', 'BOLD'):<30} : E + S² + variance + ex_energy fingerprint")
-    print(f" {colorize('Spin assignment', 'BOLD'):<30} : from largest wave function")
-    
+    for label, value in (
+        ("File", filename),
+        ("Iterations", str(len(iters))),
+        ("States tracked", str(n_states)),
+        ("Determinants", f"{min(ndets):d} → {max(ndets):d}"),
+        ("Extrapolation", "linear fit of E_var vs rPT2"),
+        ("Primary fit", "5 most converged points (or fewer if unavailable)"),
+        ("Window sensitivity", "3–6 most converged points"),
+        ("Weights", "objective: sum[(residual / abs(rPT2))²]"),
+        ("State tracking", "Hungarian matching (largest → smallest)"),
+        ("Matching metric", "E + S² + variance + ex_energy fingerprint"),
+    ):
+        print(f" {label:<29} : {value}")
     print(colorize("═" * 78, "CYAN"))
 
 
-def print_table(energies: list[float], errors: list[float], s2vals: dict):
-    """
-    Print a beautifully formatted table of extrapolated energies and excitations.
-    """
-    E0 = energies[0]
-    dE0 = errors[0]
-    
-    # Column widths
-    col_widths = {
-        'state': 6,
-        'spin': 10,
-        's2': 10,
-        'energy': 16,
-        'error': 14,
-        'excitation': 14,
-        'exc_error': 14
-    }
-    
-    # Fixed width for the table
-    total_width = 98
-    
-    print("\n" + colorize("═" * total_width, "CYAN"))
-    print(colorize(" Extrapolated Excitation Energies ".center(total_width), "BOLD"))
-    print(colorize("═" * total_width, "CYAN"))
-    
-    # Header
-    header = (
-        f"{colorize('State ', 'BOLD'):^6} │ "
-        f"{colorize('Spin      ', 'BOLD'):^10} │ "
-        f"{colorize('<S²>      ', 'BOLD'):^10} │ "
-        f"{colorize('E_tot (Ha)      ', 'BOLD'):^16} │ "
-        f"{colorize('σ(E) (Ha) ', 'BOLD'):^10} │ "
-        f"{colorize('ΔE (eV)       ', 'BOLD'):^14} │ "
-        f"{colorize('σ(ΔE) (eV)    ', 'BOLD'):^14}"
+def _fmt(value: float, fmt: str, width: int) -> str:
+    return format(value, fmt) if math.isfinite(value) else "N/A".rjust(width)
+
+
+def print_table(energies: list[float], errors: list[float], s2vals: dict) -> None:
+    e0 = energies[0]
+    u0 = errors[0]
+    width = 102
+    print("\n" + colorize("═" * width, "CYAN"))
+    print(colorize(" Extrapolated Excitation Energies ".center(width), "BOLD"))
+    print(colorize("═" * width, "CYAN"))
+    print(
+        f"{'State':>6} │ {'Spin':^10} │ {'<S²>':>9} │ {'E_tot (Ha)':>16} │ "
+        f"{'u(E) (Ha)':>11} │ {'ΔE (eV)':>12} │ {'u(ΔE) (eV)':>12}"
     )
-    print(header)
-    
-    # Separator
-    separator = "───────┼────────────┼────────────┼──────────────────┼────────────┼────────────────┼────────────────"
-    print(colorize(separator, "DIM"))
-    
-    # Print each state
-    for i in range(len(energies)):
-        if np.isnan(energies[i]):
-            continue
-        
-        s2 = s2vals.get(i, np.nan)
-        spin = spin_label(s2)
-        
-        exc = (energies[i] - E0) * HA_TO_EV
-        exc_err = np.sqrt(errors[i]**2 + dE0**2) * HA_TO_EV
-        
-        # Format values
-        energy_str = f"{energies[i]:14.8f}" if not np.isnan(energies[i]) else "N/A"
-        error_str = f"{errors[i]:10.3e}" if not np.isnan(errors[i]) else "N/A"
-        
-        # Color errors
-        if not np.isnan(errors[i]):
-            if errors[i] < 1e-4:
-                error_str = colorize(error_str, "GREEN")
-            elif errors[i] < 1e-3:
-                error_str = colorize(error_str, "YELLOW")
-            else:
-                error_str = colorize(error_str, "RED")
-        
-        # Color excitation error
-        if not np.isnan(exc_err):
-            if exc_err < 0.01:
-                exc_err_str = colorize(f"{exc_err:10.3f}", "GREEN")
-            elif exc_err < 0.1:
-                exc_err_str = colorize(f"{exc_err:10.3f}", "YELLOW")
-            else:
-                exc_err_str = colorize(f"{exc_err:10.3f}", "RED")
+    print(colorize("─" * width, "DIM"))
+    for root, energy in enumerate(energies):
+        spin_value = s2vals.get(root, np.nan)
+        spin = spin_label(spin_value)
+        exc = (energy - e0) * HA_TO_EV if math.isfinite(energy) and math.isfinite(e0) else np.nan
+        if root == 0:
+            exc_err = 0.0 if math.isfinite(e0) else np.nan
         else:
-            exc_err_str = "N/A"
-        
-        exc_str = f"{exc:10.3f}"
-        
-        # Print row with fixed widths
-        row = (
-            f"{i:>6} │ "
-            f"{spin:^10} │ "
-            f"{s2:10.4f} │ "
-            f"{energy_str:>16} │ "
-            f"{error_str:>14} │ "
-            f"{exc_str:>14} │ "
-            f"{exc_err_str:>14}"
+            exc_err = math.hypot(errors[root], u0) * HA_TO_EV
+        print(
+            f"{root:6d} │ {spin:^10} │ {_fmt(spin_value, '9.4f', 9)} │ "
+            f"{_fmt(energy, '16.8f', 16)} │ {_fmt(errors[root], '11.3e', 11)} │ "
+            f"{_fmt(exc, '12.3f', 12)} │ {_fmt(exc_err, '12.3f', 12)}"
         )
-        print(row)
-    
-    print(colorize("═" * total_width, "CYAN"))
-    
-    # Legend
-    if USE_COLORS:
-        print(f"\n{colorize('Error legend:', 'BOLD')} "
-              f"{colorize('σ(E) < 1e-4', 'GREEN')} │ "
-              f"{colorize('1e-4 < σ(E) < 1e-3', 'YELLOW')} │ "
-              f"{colorize('σ(E) > 1e-3', 'RED')} │ "
-              f"{colorize('σ(ΔE) < 0.01 eV', 'GREEN')} │ "
-              f"{colorize('0.01 < σ(ΔE) < 0.1 eV', 'YELLOW')} │ "
-              f"{colorize('σ(ΔE) > 0.1 eV', 'RED')}")
+    print(colorize("═" * width, "CYAN"))
+    print("u: heuristic fit/window-stability indicator (not a calibrated 1σ uncertainty).")
+    print("Excitation-energy indicators assume independent state errors; correlations are not estimated.")
 
 
-def print_compact_table(energies: list[float], errors: list[float], s2vals: dict):
-    """
-    Print a compact table format suitable for inclusion in papers.
-    """
-    E0 = energies[0]
-    dE0 = errors[0]
-    
-    total_width = 60
-    
-    print("\n" + colorize("═" * total_width, "CYAN"))
-    print(colorize(" Extrapolated Excitation Energies (Compact) ".center(total_width), "BOLD"))
-    print(colorize("═" * total_width, "CYAN"))
-    
-    print(f"{'State':>6} {'Spin':^10} {'<S²>':^8} {'ΔE (eV)':^12} {'σ(ΔE)':^10} {'E_tot (Ha)':^14}")
-    print("─" * total_width)
-    
-    for i in range(len(energies)):
-        if np.isnan(energies[i]):
+def print_compact_table(energies: list[float], errors: list[float], s2vals: dict) -> None:
+    e0 = energies[0]
+    u0 = errors[0]
+    width = 75
+    print("\n" + colorize("═" * width, "CYAN"))
+    print(colorize(" Extrapolated Excitation Energies (Compact) ".center(width), "BOLD"))
+    print(colorize("═" * width, "CYAN"))
+    print(f"{'State':>6} {'Spin':^10} {'<S²>':^9} {'ΔE (eV)':>12} {'u(ΔE)':>11} {'E_tot (Ha)':>16}")
+    print("─" * width)
+    for root, energy in enumerate(energies):
+        spin_value = s2vals.get(root, np.nan)
+        exc = (energy - e0) * HA_TO_EV if math.isfinite(energy) and math.isfinite(e0) else np.nan
+        exc_err = 0.0 if root == 0 and math.isfinite(e0) else math.hypot(errors[root], u0) * HA_TO_EV
+        print(
+            f"{root:6d} {spin_label(spin_value):^10} {_fmt(spin_value, '9.4f', 9)} "
+            f"{_fmt(exc, '12.4f', 12)} {_fmt(exc_err, '11.4f', 11)} "
+            f"{_fmt(energy, '16.8f', 16)}"
+        )
+    print(colorize("═" * width, "CYAN"))
+    print("u: heuristic extrapolation-stability indicator, not a calibrated 1σ error bar.")
+
+
+def print_fit_diagnostics(fits: list[dict | None]) -> None:
+    """Display individual 3-, 4-, 5-, and 6-point extrapolated intercepts."""
+    print("\nFit-window diagnostics (energies and indicators in Hartree):")
+    print(
+        f"{'State':>5} {'N':>3} {'Fit':>3} {'u_fit':>10} {'u_window':>10} "
+        f"{'b(3)':>15} {'b(4)':>15} {'b(5)':>15} {'b(6)':>15}"
+    )
+    for root, fit in enumerate(fits):
+        if fit is None:
+            print(f"{root:5d}  no stable fit (fewer than three usable points or singular windows)")
             continue
-        
-        s2 = s2vals.get(i, np.nan)
-        spin = spin_label(s2)
-        
-        exc = (energies[i] - E0) * HA_TO_EV
-        exc_err = np.sqrt(errors[i]**2 + dE0**2) * HA_TO_EV
-        
-        energy_str = f"{energies[i]:14.8f}" if not np.isnan(energies[i]) else "N/A"
-        
-        error_str = f"{exc_err:10.4f}" if i > 0 else f"{0.0:10.4f}"
-        if i > 0 and USE_COLORS:
-            if exc_err < 0.01:
-                error_str = colorize(error_str, "GREEN")
-            elif exc_err < 0.1:
-                error_str = colorize(error_str, "YELLOW")
-            else:
-                error_str = colorize(error_str, "RED")
-        
-        print(f"{i:>6} {spin:^10} {s2:8.4f} {exc:12.4f} {error_str:>10} {energy_str:>14}")
-    
-    print(colorize("═" * total_width, "CYAN"))
+        intercepts = [
+            f"{fit['windows'][size]['energy']:15.8f}"
+            if size in fit["windows"] else f"{'N/A':>15}"
+            for size in (3, 4, 5, 6)
+        ]
+        print(
+            f"{root:5d} {fit['n_points']:3d} {fit['fit_points']:3d} "
+            f"{fit['fit_uncertainty']:10.3e} {fit['window_sensitivity']:10.3e} "
+            + " ".join(intercepts)
+        )
 
 
-# ============================================================
-# Main Function
-# ============================================================
-
-def compute(filename: str, compact: bool = False):
-    """
-    Main computation workflow.
-    """
-    # Load and parse data
-    iters = load_data(filename)
-    
-    # Track states across iterations
-    trajectories, spin_states = track_states(iters)
-    
-    # Extrapolate each state
-    energies = []
-    errors = []
-    for i in range(len(trajectories)):
-        result = extrapolate(trajectories[i])
-        if result is None:
-            energies.append(np.nan)
-            errors.append(np.nan)
-        else:
-            e, err = result
-            energies.append(e)
-            errors.append(err)
-    
-    # Print results
-    print_summary(filename, iters, len(trajectories))
-    
+def compute(filename: str, compact: bool = False, diagnostics: bool = False):
+    iterations = load_data(filename)
+    trajectories, spins = track_states(iterations)
+    fits = [extrapolate(trajectories[root], details=True) for root in range(len(trajectories))]
+    energies = [fit["energy"] if fit is not None else float("nan") for fit in fits]
+    errors = [fit["uncertainty"] if fit is not None else float("nan") for fit in fits]
+    print_summary(filename, iterations, len(trajectories))
     if compact:
-        print_compact_table(energies, errors, spin_states)
+        print_compact_table(energies, errors, spins)
     else:
-        print_table(energies, errors, spin_states)
+        print_table(energies, errors, spins)
+    if diagnostics or not compact:
+        print_fit_diagnostics(fits)
+    return energies, errors, fits
+
+
+def main(argv=None) -> int:
+    parser = argparse.ArgumentParser(
+        description="Extrapolate SCI energies to the FCI limit in a fixed one-electron basis.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "Example:\n"
+            "  python3 SCI_extrapolator.py example/00003.json\n"
+            "  python3 SCI_extrapolator.py --compact example/00003.json"
+        ),
+    )
+    parser.add_argument("filename", help="Path to a Quantum Package SCI JSON file")
+    parser.add_argument("--compact", "-c", action="store_true", help="Compact paper-style table")
+    parser.add_argument("--diagnostics", action="store_true", help="Show individual fit diagnostics")
+    parser.add_argument("--no-colors", action="store_true", help="Disable terminal colors")
+    args = parser.parse_args(argv)
+    global USE_COLORS
+    if args.no_colors:
+        USE_COLORS = False
+    try:
+        compute(args.filename, compact=args.compact, diagnostics=args.diagnostics)
+    except (ValueError, np.linalg.LinAlgError) as error:
+        print(f"SCI extrapolation error: {error}", file=sys.stderr)
+        return 1
+    return 0
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
-        description="Extrapolate SCI energies to the complete basis set limit.",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Example usage:
-  python3 sci_extrapolator.py HF/aug-cc-pvdz/MoreStates/HF/json/00003.json
-  python3 sci_extrapolator.py --compact HF/aug-cc-pvdz/MoreStates/HF/json/00003.json
-        """
-    )
-    parser.add_argument("filename", help="Path to the JSON data file.")
-    parser.add_argument("--compact", "-c", action="store_true", 
-                       help="Use compact table format (good for papers)")
-    parser.add_argument("--no-colors", action="store_true",
-                       help="Disable colored output")
-    args = parser.parse_args()
-    
-    if args.no_colors:
-        USE_COLORS = False
-    
-    compute(args.filename, compact=args.compact)
+    sys.exit(main())
